@@ -158,3 +158,19 @@ def quickex_hook():
     # handle event...
     return "ok", 200
 ```
+
+---
+
+## Escrows
+
+An escrow locks funds from a creator account until they are released to a recipient or refunded back to the creator.
+
+### Self-directed escrows
+
+QuickEx **allows** the creator and recipient of an escrow to be the same account. This is an explicit, supported configuration:
+
+- **Create** — a self-directed escrow is created like any other; the creator's balance is debited by the escrowed amount.
+- **Release** — releasing a self-directed escrow credits the recipient (the same account), so the net balance change is zero and total balances are conserved.
+- **Refund** — refunding a self-directed escrow returns the funds to the creator (the same account), again a net-zero balance change.
+
+Role checks are still enforced: only the creator may refund and only the designated recipient may release, even when both roles resolve to the same account. No path bypasses these checks, and balances always conserve across create, release, and refund.
