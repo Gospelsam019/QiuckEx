@@ -158,3 +158,20 @@ def quickex_hook():
     # handle event...
     return "ok", 200
 ```
+
+---
+
+## Escrow expiry
+
+Escrow links carry an `expires_at` ledger timestamp. Expiry is evaluated against the
+current ledger close time using a strict comparison, so the boundary is deterministic:
+
+| Current ledger time vs `expires_at` | Escrow state |
+| --- | --- |
+| `now < expires_at` (immediately before) | `active` — funds can still be released or refunded |
+| `now == expires_at` (exactly at) | `active` — the escrow is **not** expired at the exact boundary |
+| `now > expires_at` (immediately after) | `expired` — only refund is permitted |
+
+In other words, an escrow expires only once the ledger time is strictly greater than
+`expires_at`. At the exact equality point the escrow remains active, matching the
+documented state-transition table.
