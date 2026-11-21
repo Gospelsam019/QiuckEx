@@ -125,6 +125,25 @@ failure in a late validation branch cannot leave a partially updated record.
 These tests live alongside the escrow service specs and run as part of
 `npm run test:unit`.
 
+### Escrow Event Ordering Tests
+
+Multi-step escrow operations (deposit, withdraw, refund) may emit more than one
+event per invocation. Indexers rely on the emitted sequence to reconstruct
+lifecycle order, so the order and payloads are treated as part of the contract.
+
+- **Committed state only**: Events are emitted only after the corresponding
+  state transition has been committed. No event is emitted for a step that did
+  not persist.
+- **Stable ordering**: For a given operation the emitted event sequence is
+  deterministic and documented below; tests assert the exact order.
+- **No partial sequences on failure**: If an operation fails at any step, no
+  lifecycle events from that invocation are emitted (no partial sequence).
+- **Payload consistency**: Each event's payload matches the committed record
+  (escrow id, amounts, participants) at the time of emission.
+
+These tests live alongside the escrow service specs and run as part of
+`npm run test:unit`.
+
 ## Event System
 
 ### Event Types
@@ -133,6 +152,20 @@ These tests live alongside the escrow service specs and run as part of
 - `stellar.EscrowRefunded` - Escrow refund events
 - `payment.received` - Payment received events
 - `username.claimed` - Username claim events
+
+### Escrow Event Ordering
+
+For operations that emit multiple events, the emission order is stable and
+reflects committed state transitions:
+
+- **Deposit**: `stellar.EscrowDeposited` (single lifecycle event).
+- **Withdraw**: `stellar.EscrowWithdrawn` (single lifecycle event).
+- **Refund**: `stellar.EscrowRefunded` (single lifecycle event).
+
+When an operation performs additional state updates (e.g. balance or cursor
+updates), those are committed before the corresponding lifecycle event is
+emitted. If the operation fails, no lifecycle event is emitted for that
+invocation.
 
 ### Event Flow
 1. StellarIngestionService streams events from Horizon
@@ -161,6 +194,8 @@ These tests live alongside the escrow service specs and run as part of
   must leave escrow storage and balances unchanged.
 - Rollback is expected to be atomic; the invariant tests above guard against
   regressions where a late validation branch partially mutates state.
+- A failed invocation emits no lifecycle events, so indexers never observe a
+  partial sequence for an operation that did not commit.
 
 ### Rate Limiting
 - Built-in rate limiting for API endpoints
@@ -232,38 +267,4 @@ npm run start
 #### Identifying Slow External Dependencies
 1. Query `external_call_duration_seconds` by service label
 2. High latency on `horizon` operations indicates network issues
-3. High latency on `webhook` operations indicates endpoint issues
-4. Check `error_total` metric for error types by service
-
-### Reconciliation
-
-#### Manual Reconciliation Trigger
-```bash
-# Trigger reconciliation run
-curl -X POST http://localhost:4000/reconciliation/trigger
-
-# Check reconciliation status
-curl http://localhost:4000/reconciliation/status
-```
-
-#### Interpreting Reconciliation Reports
-- `processed` - Total records checked
-- `updated` - Records updated to match on-chain state
-- `noOp` - Records already consistent with on-chain state
-- `skipped` - Records skipped due to Horizon unavailability
-- `irreconcilable` - Records requiring manual review
-
-#### Handling Irreconcilable Records
-1. Check logs for `IRRECONCILABLE` error messages
-2. Verify on-chain state using Stellar expert or Horizon directly
-3. For escrows: Check if account exists, balance, and expiry
-4. For payments: Verify transaction hash on-chain
-5. Manual database update may be required after verification
-
-#### Backfill Operations
-```bash
-# Trigger backfill for specific ledger range
-curl -X POST http://localhost:4000/reconciliation/backfill \
-  -H "Content-Type: application/json" \
-  -d '{"startLedger": 1000, "endLedger": 2000}'
-```
+3. High latency on `webhook` operations indicates end
