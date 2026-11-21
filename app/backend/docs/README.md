@@ -144,6 +144,27 @@ lifecycle order, so the order and payloads are treated as part of the contract.
 These tests live alongside the escrow service specs and run as part of
 `npm run test:unit`.
 
+### Contract Budget Regression Tests
+
+Contract budget regression tests exercise the worst-case call paths under the
+declared limits (maximum participants, maximum amounts, maximum event payload
+size) and assert that CPU and storage growth stay within a fixed budget.
+
+- **Reproducible inputs**: Each case builds its inputs deterministically from
+  the declared limits, so the same case produces the same measurement on every
+  run and on every machine.
+- **Regression threshold**: Each case records a budget threshold. Exceeding the
+  threshold fails the contract CI job; the job does not warn-and-continue.
+- **Threshold changes require review**: Any change to a recorded threshold must
+  be accompanied by an explicit review note explaining why the budget moved.
+  Silent threshold bumps are rejected in review.
+- **Boundary coverage**: Cases include the exact-limit input (passes) and the
+  limit-plus-one input (rejected by validation) so the boundary is covered on
+  both sides.
+
+These tests run as part of the contract CI job and are not part of
+`npm run test:unit`.
+
 ## Event System
 
 ### Event Types
@@ -229,42 +250,4 @@ npm run start
 - `http_requests_total` - Total HTTP requests by method, route, status
 - `http_rate_limited_requests_total` - Rate-limited requests by method, route, group
 - `http_active_connections` - Current active connections
-- `ingestion_lag_seconds` - Lag between current ledger and last ingested ledger
-- `webhook_retry_total` - Webhook retry attempts by event type, status
-- `webhook_delivery_duration_seconds` - Webhook delivery latency by event type, status
-- `external_call_duration_seconds` - External API call latency by service, operation
-- `error_total` - Error count by service, error type
-
-### Logging
-- Structured logging with Winston
-- Correlation IDs for request tracing
-- Different log levels for development and production
-- All logs include: `request_id`, `user_id`, `route`, `method`, `duration`, `status`
-
-## Runbook
-
-### Observability
-
-#### Checking Request Traces
-1. Extract `correlationId` from request headers (`x-correlation-id`)
-2. Search logs for the correlation ID to trace full request lifecycle
-3. Check `logs/combined.log` for structured JSON logs
-4. Check `logs/error.log` for error-specific logs
-
-#### Monitoring Ingestion Lag
-1. Query `ingestion_lag_seconds` metric for contract ID
-2. Alert if lag exceeds 60 seconds (indicates stalled ingestion)
-3. Check ingestion service logs for stream errors
-4. Verify Horizon API connectivity
-
-#### Debugging Webhook Failures
-1. Check `webhook_retry_total` metric for retry counts
-2. Query `webhook_delivery_duration_seconds` for latency patterns
-3. Review notification logs in database for specific webhook URLs
-4. Use `GET /webhooks/delivery-logs` endpoint for detailed logs
-5. Trigger manual redelivery via `POST /webhooks/redeliver`
-
-#### Identifying Slow External Dependencies
-1. Query `external_call_duration_seconds` by service label
-2. High latency on `horizon` operations indicates network issues
-3. High latency on `webhook` operations indicates end
+- `ingestion_lag_seconds` - L
