@@ -107,6 +107,24 @@ npm run test:e2e
 - Coverage includes all major services and repositories
 - Tests use Jest framework with NestJS testing utilities
 
+### Escrow Invariant Tests
+
+Escrow state invariants are verified after every failed invocation so that a
+failure in a late validation branch cannot leave a partially updated record.
+
+- **Snapshot before failure**: Each test snapshots the relevant storage
+  (escrow records, balances, cursors) before triggering a representative
+  failure at each transition stage (deposit, withdraw, refund).
+- **Assert unchanged on failure**: After the failed call, the test asserts that
+  every invariant-relevant value matches the pre-failure snapshot.
+- **Failure classes covered**:
+  - Authorization errors (unauthorized caller, missing signer, wrong owner)
+  - Downstream transfer errors (insufficient balance, transfer rejection,
+    Horizon/Soroban submission failure)
+
+These tests live alongside the escrow service specs and run as part of
+`npm run test:unit`.
+
 ## Event System
 
 ### Event Types
@@ -137,6 +155,12 @@ npm run test:e2e
 - HTTP exception filters for standardized error responses
 - Winston logging for structured logging
 - Graceful degradation for external service failures
+
+### Escrow Failure Semantics
+- A failed escrow invocation (authorization or downstream transfer error)
+  must leave escrow storage and balances unchanged.
+- Rollback is expected to be atomic; the invariant tests above guard against
+  regressions where a late validation branch partially mutates state.
 
 ### Rate Limiting
 - Built-in rate limiting for API endpoints
@@ -242,82 +266,4 @@ curl http://localhost:4000/reconciliation/status
 curl -X POST http://localhost:4000/reconciliation/backfill \
   -H "Content-Type: application/json" \
   -d '{"startLedger": 1000, "endLedger": 2000}'
-
-# Monitor backfill progress
-curl http://localhost:4000/reconciliation/backfill/status
 ```
-
-### Common Issues
-
-#### Ingestion Stream Stalled
-- Symptom: `ingestion_lag_seconds` increasing continuously
-- Resolution: Check Horizon API status, restart ingestion service
-- Prevention: Monitor lag metric, set up alerts at 60s threshold
-
-#### High Webhook Failure Rate
-- Symptom: `webhook_retry_total` increasing, `error_total{service="webhook"}` high
-- Resolution: Check webhook URL accessibility, verify secret configuration
-- Prevention: Monitor webhook delivery logs, test endpoints before registration
-
-#### Reconciliation Discrepancies
-- Symptom: High `irreconcilable` count in reconciliation report
-- Resolution: Manual review of flagged records, verify on-chain state
-- Prevention: Regular reconciliation runs, monitor Horizon API health
-
-#### Horizon API Latency
-- Symptom: High `external_call_duration_seconds{service="horizon"}`
-- Resolution: Check Horizon status, consider failover to backup instance
-- Prevention: Implement failover logic, monitor Horizon response times
-
-## Security
-
-### Features
-- Helmet for security headers
-- CORS configuration
-- Input validation and sanitization
-- Environment variable validation
-
-### Best Practices
-- Principle of least privilege
-- Secure secret management
-- Regular dependency updates
-
-## Development
-
-### Getting Started
-```bash
-# Install dependencies
-npm install
-
-# Minimal local env required for boot
-export NETWORK=testnet
-export SUPABASE_URL=http://127.0.0.1:54321
-export SUPABASE_ANON_KEY=your_supabase_anon_key
-
-# Run development server
-npm run start:dev
-
-# Run linting
-npm run lint
-
-# Run type checking
-npm run type-check
-```
-
-### Code Style
-- ESLint configuration for consistent code style
-- Prettier for code formatting
-- TypeScript for type safety
-
-## Contributing
-
-### Guidelines
-- Follow existing code patterns and conventions
-- Write comprehensive tests for new features
-- Update documentation for API changes
-- Ensure all tests pass before submitting PRs
-
-### Git Workflow
-- Feature branches for new development
-- Pull requests for code review
-- Semantic versioning for releases

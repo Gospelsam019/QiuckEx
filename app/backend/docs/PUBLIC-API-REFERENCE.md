@@ -158,3 +158,17 @@ def quickex_hook():
     # handle event...
     return "ok", 200
 ```
+
+---
+
+## Escrow state invariants
+
+Escrow operations are atomic: a failed invocation must leave all invariant-relevant state unchanged. This applies to both authorization failures (e.g. caller is not the escrow owner or signer) and downstream transfer failures (e.g. the token transfer reverts or the destination rejects the payment).
+
+When an invocation fails, the following are guaranteed to be unchanged from their pre-call values:
+
+- The escrow record (status, amounts, parties, and timestamps).
+- The associated storage entries and their versioned keys.
+- Account balances for both the source and destination parties.
+
+Clients should treat any non-`2xx` response as a no-op and may safely retry idempotent operations. Failed invocations do not emit `payment.completed` webhooks.
