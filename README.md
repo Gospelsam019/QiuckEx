@@ -268,3 +268,6 @@ Built with ❤️ by Pulsefy. Powered by Stellar. 🚀
 
 <!-- handsoff-issue-592 -->
 - #592: Design a mobile layout for transaction tables
+
+<!-- handsoff-issue-594 -->
+- #594: Add a reduce-motion interaction spec for payment feedback
