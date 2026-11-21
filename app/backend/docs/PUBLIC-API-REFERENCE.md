@@ -174,3 +174,18 @@ QuickEx **allows** the creator and recipient of an escrow to be the same account
 - **Refund** — refunding a self-directed escrow returns the funds to the creator (the same account), again a net-zero balance change.
 
 Role checks are still enforced: only the creator may refund and only the designated recipient may release, even when both roles resolve to the same account. No path bypasses these checks, and balances always conserve across create, release, and refund.
+
+### Batch and cleanup limits
+
+Contract-side batch and cleanup entry points iterate over caller-supplied collections. To keep ledger execution and memory within budget, each entry point enforces a maximum batch size:
+
+| Entry point | Maximum items per call |
+| --- | --- |
+| Batch escrow creation | `MAX_BATCH_SIZE` (see contract constants) |
+| Batch escrow release | `MAX_BATCH_SIZE` |
+| Batch escrow refund | `MAX_BATCH_SIZE` |
+| Cleanup of expired escrows | `MAX_CLEANUP_BATCH` |
+
+- **Fail before mutation** — if the supplied collection exceeds the maximum, the call fails with a `BatchTooLarge` error and **no state is mutated**. Validation runs before any balance movement or storage write.
+- **Bounded work** — work scales only with the bounded input; a call at the maximum size completes within the ledger budget.
+- **Partial cleanup semantics** — cleanup processes at most `MAX_CLEANUP_BATCH` expired escrows per call. If more remain, the call succeeds and the remainder is left for a subsequent call; cleanup is idempotent and safe to re-invoke until no expired escrows remain.
