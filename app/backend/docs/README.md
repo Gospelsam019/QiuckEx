@@ -43,6 +43,51 @@ The QuickEx backend is a NestJS-based application that provides a comprehensive 
   - Address validation and conversion
   - Event type classification
 
+## Notification Delivery and Retry Semantics
+
+This section documents the delivery guarantees integrators can rely on. It is a reference for the behavior implemented by `NotificationService` and the notification providers; it does not introduce new guarantees.
+
+### Event creation
+
+1. `StellarIngestionService` streams contract events from Horizon and persists them.
+2. `SorobanEventParser` converts raw events into domain events.
+3. Domain events are emitted via `EventEmitter2` (e.g. `payment.received`, `username.claimed`, `stellar.EscrowDeposited`).
+4. `NotificationService` listens with `@OnEvent` handlers and, for each event, resolves the recipient's preferences and enqueues a delivery per enabled channel.
+
+Event emission is in-process and fire-and-forget: a handler failure does not roll back the originating event or the ingestion cursor.
+
+### Preferences
+
+- Preferences are stored in `notification_preferences` and are evaluated at dispatch time, per channel.
+- A channel that is disabled (or has no preference row) is skipped; no delivery is attempted and no retry is scheduled for it.
+- Preference changes apply to events dispatched after the change; already-enqueued deliveries are not retroactively re-evaluated.
+
+### Delivery guarantees per channel
+
+Delivery is **at-least-once** for channels that support retries. There is **no exactly-once guarantee**: a delivery may be attempted more than once (for example after a retry, a timeout where the provider actually accepted the request, or a redelivery). Consumers must treat notifications as idempotent and tolerate duplicates.
+
+- **Email**: handed to the email provider; retried on transient failures. Duplicate emails are possible on retry.
+- **Push**: handed to the push provider; retried on transient failures. Duplicate pushes are possible on retry.
+- **Webhook**: delivered over HTTP with retries (see below). Duplicate webhook calls are expected; receivers should deduplicate using the event identifier.
+
+### Retries and backoff
+
+- Transient failures (network errors, timeouts, 5xx responses) are retried with exponential backoff.
+- Non-retryable failures (e.g. 4xx client errors, invalid configuration) are recorded as failed and are not retried automatically.
+- Retry attempts and delivery latency are observable via the `webhook_retry_total` and `webhook_delivery_duration_seconds` metrics.
+- After retries are exhausted, the delivery is marked failed in `notification_logs`; it can be redelivered manually (see the Runbook).
+
+### Deduplication and idempotency boundary
+
+The idempotency boundary is the **event identifier** carried on each domain event. Deduplication is applied at dispatch time so that the same event is not enqueued twice for the same channel and recipient. This boundary does **not** extend across retries or manual redelivery: those are intentionally re-attempts of an already-enqueued delivery and may produce duplicates at the provider. Receivers of webhooks should therefore deduplicate on the event identifier rather than assuming single delivery.
+
+### When delivery status can be delayed
+
+- Delivery status is written to `notification_logs` after the provider responds; a slow provider delays the status update.
+- Retries extend the time before a delivery reaches a terminal state (delivered or failed).
+- If the process restarts while a delivery is in flight, the status may remain pending until the delivery is retried or reconciled.
+- Ingestion lag (`ingestion_lag_seconds`) delays event creation, which in turn delays all downstream notifications.
+
 ## API Endpoints
 
 ### Health Checks
@@ -242,82 +287,4 @@ curl http://localhost:4000/reconciliation/status
 curl -X POST http://localhost:4000/reconciliation/backfill \
   -H "Content-Type: application/json" \
   -d '{"startLedger": 1000, "endLedger": 2000}'
-
-# Monitor backfill progress
-curl http://localhost:4000/reconciliation/backfill/status
 ```
-
-### Common Issues
-
-#### Ingestion Stream Stalled
-- Symptom: `ingestion_lag_seconds` increasing continuously
-- Resolution: Check Horizon API status, restart ingestion service
-- Prevention: Monitor lag metric, set up alerts at 60s threshold
-
-#### High Webhook Failure Rate
-- Symptom: `webhook_retry_total` increasing, `error_total{service="webhook"}` high
-- Resolution: Check webhook URL accessibility, verify secret configuration
-- Prevention: Monitor webhook delivery logs, test endpoints before registration
-
-#### Reconciliation Discrepancies
-- Symptom: High `irreconcilable` count in reconciliation report
-- Resolution: Manual review of flagged records, verify on-chain state
-- Prevention: Regular reconciliation runs, monitor Horizon API health
-
-#### Horizon API Latency
-- Symptom: High `external_call_duration_seconds{service="horizon"}`
-- Resolution: Check Horizon status, consider failover to backup instance
-- Prevention: Implement failover logic, monitor Horizon response times
-
-## Security
-
-### Features
-- Helmet for security headers
-- CORS configuration
-- Input validation and sanitization
-- Environment variable validation
-
-### Best Practices
-- Principle of least privilege
-- Secure secret management
-- Regular dependency updates
-
-## Development
-
-### Getting Started
-```bash
-# Install dependencies
-npm install
-
-# Minimal local env required for boot
-export NETWORK=testnet
-export SUPABASE_URL=http://127.0.0.1:54321
-export SUPABASE_ANON_KEY=your_supabase_anon_key
-
-# Run development server
-npm run start:dev
-
-# Run linting
-npm run lint
-
-# Run type checking
-npm run type-check
-```
-
-### Code Style
-- ESLint configuration for consistent code style
-- Prettier for code formatting
-- TypeScript for type safety
-
-## Contributing
-
-### Guidelines
-- Follow existing code patterns and conventions
-- Write comprehensive tests for new features
-- Update documentation for API changes
-- Ensure all tests pass before submitting PRs
-
-### Git Workflow
-- Feature branches for new development
-- Pull requests for code review
-- Semantic versioning for releases

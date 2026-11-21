@@ -158,3 +158,47 @@ def quickex_hook():
     # handle event...
     return "ok", 200
 ```
+
+---
+
+## Notification delivery & retry semantics
+
+This section documents how QuickEx turns domain events into notifications, how per-channel preferences are applied, and what delivery guarantees you can rely on as an integrator.
+
+### Event creation
+
+- A notification is created when a domain event is emitted (for example `payment.completed` when a payment is confirmed on the Stellar network).
+- Each event produces at most one notification record per recipient. The record is persisted before any channel delivery is attempted, so a delivery failure never loses the underlying event.
+- The notification record captures the event type, recipient, and the payload needed to render the message. Channel fan-out (email, in-app, webhook, etc.) happens after the record is created.
+
+### Preferences
+
+- Recipients configure which channels are enabled per event type. Preferences are evaluated at fan-out time, not at event creation time.
+- If a channel is disabled for an event type, no delivery is attempted for that channel and no delivery record is created for it.
+- Preference changes apply to notifications created after the change; already-queued deliveries are not retroactively cancelled.
+
+### Delivery guarantees per channel
+
+Delivery is **at-least-once** per enabled channel. QuickEx does **not** guarantee exactly-once delivery: a retry, a worker restart, or a duplicate enqueue can cause the same notification to be delivered more than once. Consumers must be idempotent.
+
+- **In-app** — the notification is written to the recipient's in-app feed. Delivery is effectively once per notification record, but the feed may briefly show a notification before its delivery status is finalized.
+- **Email** — handed to the mail provider. Success means the provider accepted the message; final inbox placement is outside QuickEx's control.
+- **Webhook** — delivered as an HTTP `POST` (see [Webhook payload](#webhook-payload)). Success is a `2xx` response.
+
+### Retries and backoff
+
+- A delivery attempt that fails (non-`2xx` response, timeout, or transport error) is retried with exponential backoff, up to **5 retries over 24 hours**.
+- Retries are scheduled per delivery, not per notification; a failure on one channel does not block other channels.
+- After the retry budget is exhausted the delivery is marked failed and is not retried again automatically.
+
+### Deduplication and its idempotency boundary
+
+- QuickEx deduplicates notifications at the **event creation boundary**: a given domain event produces a single notification record per recipient, so re-emitting the same event does not create a second notification.
+- This deduplication does **not** extend to delivery. Because delivery is at-least-once, the same notification may reach a channel more than once. Use the stable identifiers in the payload (`delivery_id`, `payment.id`, `payment.transaction_hash`) to deduplicate on your side.
+- There is no exactly-once guarantee across the event-creation and delivery boundaries; treat the event-creation dedup and the at-least-once delivery as separate concerns.
+
+### When delivery status can be delayed
+
+- Delivery status reflects the latest recorded attempt and may lag behind actual delivery while a retry is scheduled or in flight.
+- Status is finalized only after a `2xx` response or after the retry budget is exhausted, so a notification can remain in a pending/retrying state for up to the 24-hour retry window.
+- Do not treat a missing or pending status as a failed delivery; poll the delivery log or rely on the terminal status.
