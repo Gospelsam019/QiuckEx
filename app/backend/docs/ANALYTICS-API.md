@@ -53,6 +53,8 @@ All analytics queries are scoped to the authenticated caller at the service/quer
 | `week` | 300s |
 | `month` | 900s |
 
+Cached earnings responses report their freshness via the `X-Cache-Status` (`HIT`/`MISS`) and `X-Cache-Age` (seconds) response headers, and include `generatedAt` in each bucket's enclosing payload metadata. Clients render the same stale-data label and timestamp treatment described in [Data Freshness](#data-freshness).
+
 **Response Format**:
 
 ```json
@@ -191,6 +193,8 @@ curl -X GET "http://localhost:3000/analytics/alice/earnings?period=month&from=20
     "granularity": "daily",
     "assetFilter": ["XLM", "USDC:GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXUSMIQ6KUVNNBI5I7AD3H"],
     "generatedAt": "2026-04-28T15:30:45.123Z",
+    "cacheStatus": "cached",
+    "cacheAgeSeconds": 42,
     "executionTimeMs": 187
   }
 }
