@@ -1,10 +1,18 @@
-# QuickEx Backend (NestJS)
+# Backend
 
-A NestJS-based backend API for the QuickEx Stellar exchange platform.
+## Health and readiness
 
-## Setup
+The backend exposes two distinct probes so that traffic routing can react to
+dependency state without taking a live process out of rotation prematurely.
 
-### 1. Install dependencies
+- **Liveness** (`/health/live`): reports whether the process itself is running.
+  It stays available (HTTP 200) during dependency outages, including a Supabase
+  outage, so orchestrators do not restart a healthy process.
+- **Readiness** (`/health/ready`): reports whether the process can serve traffic.
+  It reflects the state of critical dependencies. When Supabase (the critical
+  persistence dependency) is unavailable, readiness reports `degraded` and
+  returns a non-ready status so traffic is not routed to the instance until the
+  dependency recovers.
 
 From the repository root:
 
@@ -32,6 +40,7 @@ cp .env.example .env
 | `SUPABASE_URL`     | **Yes**  | -             | Supabase project URL (e.g., `https://xxx.supabase.co`)|
 | `SUPABASE_ANON_KEY`| **Yes**  | -             | Supabase anonymous (public) API key                   |
 | `MAX_USERNAMES_PER_WALLET` | No | (no limit) | Max usernames per wallet; omit for no limit           |
+| `RECONCILIATION_BATCH_SIZE` | No | `1000` | Max ledgers processed per reconciliation job; clamped to safe bounds |
 
 #### Getting Supabase credentials
 
@@ -59,6 +68,14 @@ The backend validates all environment variables at startup using a Joi schema. I
 2. Exit with a non-zero exit code
 
 **Note:** For security, actual secret values are never logged—only the key names.
+
+## Reconciliation cursor
+
+Reconciliation runs over large ledger intervals are processed in bounded batches so a single job cannot exceed request time or memory limits.
+
+- Each job processes at most `RECONCILIATION_BATCH_SIZE` ledgers (default `1000`). The value is validated and clamped to a safe range (`1`–`10000`); out-of-range values are clamped rather than rejected.
+- A resumable cursor (`lastProcessedLedger`) is persisted with the run metadata after each batch. Restarting a run resumes from the ledger immediately after the cursor, so ledgers are neither skipped nor double-counted.
+- Progress is observable via the run metadata (`lastProcessedLedger`, `processedCount`, `completed`), which is updated as each batch completes.
 
 ## Stellar configuration
 
@@ -154,7 +171,6 @@ A holder is stale when its `state` is `idle`/`idle in transaction` with no activ
 ## Scripts
 
 Run from repo root using TurboRepo filters:
-=======
 
 ```bash
 pnpm turbo run dev --filter=@quickex/backend      # Start development server
@@ -217,74 +233,4 @@ The API provides two endpoints for monitoring, following standard probe semantic
 
 | Method | Path        | Description              | Request / Query                 | Response                    |
 | ------ | ----------- | ------------------------ | ------------------------------- | --------------------------- |
-| POST   | `/username` | Create a new username    | Body: `{ "username", "publicKey" }` | `{ "ok": true }` or 409/403 |
-| GET    | `/username` | List usernames for wallet| Query: `?publicKey=G...`         | `{ "usernames": [...] }`     |
-
-**Username rules (enforced server-side):**
-- **Length:** 3–32 characters (inclusive).
-- **Characters:** Lowercase letters (`a-z`), digits (`0-9`), underscore (`_`) only. Pattern: `^[a-z0-9_]+$`.
-- **Uniqueness:** One username per value (normalized to lowercase). Duplicate creation returns **409 Conflict** with code `USERNAME_CONFLICT`.
-- **Per-wallet limit (optional):** Set `MAX_USERNAMES_PER_WALLET` to cap usernames per Stellar public key; exceeding returns **403 Forbidden** with code `USERNAME_LIMIT_EXCEEDED`.
-- **Race conditions:** Uniqueness is enforced by a database unique constraint so concurrent creates are safe.
-
-### Payment Links
-
-| Method | Path                | Description                      | Request Body                | Response                  |
-| ------ | ------------------- | -------------------------------- | --------------------------- | ------------------------- |
-| POST   | `/links/metadata`   | Generate canonical link metadata | See below                   | See below                 |
-
-#### Generate Canonical Link Metadata
-
-**Endpoint:** `POST /links/metadata`
-
-Validates payment link parameters and generates canonical metadata for frontend consumption.
-
-**Request Body:**
-```json
-{
-  "amount": 50.5,
-  "memo": "Payment for service",
-  "memoType": "text",
-  "asset": "XLM",
-  "privacy": false,
-  "expirationDays": 30
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "amount": "50.5000000",
-    "memo": "Payment for service",
-    "memoType": "text",
-    "asset": "XLM",
-    "privacy": false,
-    "expiresAt": "2026-02-24T12:00:00.000Z",
-    "canonical": "amount=50.5000000&asset=XLM&memo=Payment%20for%20service",
-    "metadata": {
-      "normalized": false
-    }
-  }
-}
-```
-
-**Validation Rules:**
-- `amount`: Must be between 0.0000001 and 1,000,000
-- `memo`: Maximum 28 characters, sanitized for security
-- `asset`: Must be whitelisted (XLM, USDC, AQUA, yXLM)
-- `expirationDays`: Between 1 and 365 days
-
-**Error Codes:**
-- `INVALID_AMOUNT` - Amount is invalid or out of range
-- `MEMO_TOO_LONG` - Memo exceeds 28 characters
-- `ASSET_NOT_WHITELISTED` - Asset not supported
-- `INVALID_EXPIRATION` - Expiration days out of range
-
-**Example cURL:**
-```bash
-curl -X POST http://localhost:4000/links/metadata \
-  -H "Content-Type: application/json" \
-  -d '{"amount":50.5,"memo":"Payment for service","asset":"XLM"}'
-```
+| POST   | `/usern
