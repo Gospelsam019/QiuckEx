@@ -100,6 +100,53 @@ means and what to alert on.
   )
   ```
 
+## Reconciliation metrics
+
+Reconciliation runs process a bounded ledger range per job and persist a
+resumable cursor with the run metadata. The following metrics expose progress so
+operators can observe a run advancing (or stalling) across bounded batches.
+
+### `app_reconciliation_ledgers_processed_total`
+
+- **Type:** counter
+- **Labels:** `run_id`
+- **Description:** Total ledgers processed by reconciliation, partitioned by run.
+  Increments once per ledger as each bounded batch is committed, so the sum
+  across a run reflects durable progress (no double-counting on resume).
+- **Example query** — ledgers processed per run over 5m:
+
+  ```promql
+  sum by (run_id) (rate(app_reconciliation_ledgers_processed_total[5m]))
+  ```
+
+### `app_reconciliation_cursor_ledger`
+
+- **Type:** gauge
+- **Labels:** `run_id`
+- **Description:** The last ledger sequence durably committed to the run's
+  resumable cursor. On restart the run resumes from this cursor, so a stalled
+  gauge indicates a run that is not making progress.
+- **Example query** — cursor position per run:
+
+  ```promql
+  app_reconciliation_cursor_ledger
+  ```
+
+### `app_reconciliation_batch_duration_seconds`
+
+- **Type:** histogram
+- **Labels:** `run_id`
+- **Description:** Wall-clock duration in seconds of each bounded reconciliation
+  batch. Use this to tune the configured batch size within its safe bounds.
+- **Example query** — p95 batch duration per run over 10m:
+
+  ```promql
+  histogram_quantile(
+    0.95,
+    sum by (le, run_id) (rate(app_reconciliation_batch_duration_seconds_bucket[10m]))
+  )
+  ```
+
 ## Runtime metrics (default collectors)
 
 These are emitted by `prom-client`'s default collectors and are useful for
@@ -153,6 +200,15 @@ sum(rate(app_escrow_operations_total{status="failure"}[5m])) > 0.1
 - `for: 5m`
 - Severity: `critical`
 
+**Supabase dependency down** — critical persistence dependency unavailable:
+
+```promql
+app_dependency_up{dependency="supabase"} == 0
+```
+
+- `for: 2m`
+- Severity: `critical`
+
 ### P1 — notify, investigate during business hours
 
 **Elevated error rate** — more than 0.5% of requests failing for 10 minutes:
@@ -188,6 +244,16 @@ histogram_quantile(
 ```
 
 - `for: 10m`
+- Severity: `warning`
+
+**Stalled reconciliation run** — a run whose cursor has not advanced for 15
+minutes while it is still active:
+
+```promql
+increase(app_reconciliation_ledgers_processed_total[15m]) == 0
+```
+
+- `for: 15m`
 - Severity: `warning`
 
 **Event loop lag** — event loop lag above 100ms for 10 minutes:
