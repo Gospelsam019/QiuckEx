@@ -10,6 +10,29 @@ Authorization: Bearer <access_token>
 
 ---
 
+## Privacy modes
+
+QuickEx links can be created in one of two privacy modes. The table below states exactly what each mode exposes on-chain and off-chain. No mode hides information that the Stellar network itself records publicly.
+
+| Information | Public mode | Private mode |
+| --- | --- | --- |
+| Link URL / slug | Public — anyone with the URL can view the link | Public — the URL is still required to open the link |
+| Recipient address | Public — visible in the link and on-chain | Public — the destination address is recorded on-chain |
+| Sender address | Public — recorded on-chain | Public — recorded on-chain |
+| Amount & asset | Public — recorded on-chain | Public — recorded on-chain |
+| Transaction hash | Public — recorded on-chain | Public — recorded on-chain |
+| Link metadata (memo, label) | Public — returned by the API | Private — omitted from public API responses |
+| Link listing / discovery | Public — appears in public listings | Private — excluded from public listings |
+
+Notes:
+
+- **Private mode does not make on-chain data confidential.** Stellar transactions are public by design; amounts, addresses, and transaction hashes are always visible on the ledger.
+- Private mode only limits off-chain exposure: link metadata is not returned by public API responses and the link is excluded from public listings.
+- Privacy modes are subject to network availability. If a mode is unavailable on the current network, it cannot be selected when creating a link; the API rejects such requests with `422 Unprocessable Entity`.
+- See the [privacy policy](https://quickex.example/privacy) for how QuickEx handles personal data.
+
+---
+
 ## Webhooks
 
 Register a webhook URL to receive a `POST` request whenever a payment to one of your QuickEx links is confirmed on the Stellar network.
@@ -41,6 +64,8 @@ Response `201 Created`:
 }
 ```
 
+When the webhook feature is paused, this endpoint responds with `503 Service Unavailable` and no webhook is created.
+
 ### List webhooks
 
 `GET /webhooks`
@@ -60,11 +85,91 @@ Response `200 OK`:
 ]
 ```
 
+This read remains available while paused.
+
 ### Delete a webhook
 
 `DELETE /webhooks/:id`
 
 Response `204 No Content`.
+
+When the webhook feature is paused, this endpoint responds with `503 Service Unavailable` and the webhook is left untouched.
+
+---
+
+## Payment status
+
+`GET /payments/:transaction_hash/status`
+
+Returns the authoritative status for a single payment, keyed by its Stellar transaction hash. Repeated reads for the same hash are **monotonic**: once a payment reaches a terminal state it never regresses to `pending`.
+
+### Status transitions
+
+```
+pending ──► confirmed   (terminal)
+pending ──► failed      (terminal)
+```
+
+- `pending` — the transaction has been submitted but not yet confirmed on-chain.
+- `confirmed` — the transaction was observed on Horizon and settled. Terminal.
+- `failed` — the transaction was rejected or definitively not settled. Terminal.
+
+Terminal states (`confirmed`, `failed`) are sticky. A later read will never return `pending` for a hash that has already reached a terminal state.
+
+### Transient upstream failures
+
+If Horizon is temporarily unreachable or returns an error while a payment is still `pending`, the endpoint does **not** fabricate settlement. It returns the last known authoritative state (or an error), never a false `confirmed`/`failed`:
+
+- If a terminal state is already known, that terminal state is returned.
+- If the payment is still `pending` and Horizon cannot be reached, the response is `503 Service Unavailable` with a retryable error body. Clients should retry with backoff.
+
+Response `200 OK`:
+
+```json
+{
+  "transaction_hash": "abc123...",
+  "status": "confirmed",
+  "updated_at": "2024-01-01T00:00:00.000Z"
+}
+```
+
+Response `503 Service Unavailable` (transient upstream failure, payment still pending):
+
+```json
+{
+  "error": "upstream_unavailable",
+  "message": "Payment status could not be confirmed; retry with backoff.",
+  "retryable": true
+}
+```
+
+---
+
+## Reconciliation
+
+Reconciliation runs over a ledger interval. To keep each run within request time and memory limits, a run processes a **bounded ledger range** per job and persists a resumable cursor with the run metadata.
+
+### Bounded range & cursor
+
+- Each job processes at most `limit` ledgers per invocation. `limit` is configurable but clamped to a safe range (`min`–`max`); out-of-range values are rejected or clamped to the nearest bound.
+- The run metadata records a `cursor` (the last fully processed ledger sequence). A restart resumes from `cursor + 1`, so no ledger is skipped or double-counted.
+- Progress is observable via the run metadata: `cursor`, `limit`, `processed`, and `complete`.
+
+Response `200 OK` (run metadata):
+
+```json
+{
+  "run_id": "rec_01HXYZ...",
+  "from_ledger": 1000,
+  "to_ledger": 5000,
+  "cursor": 1499,
+  "limit": 500,
+  "processed": 500,
+  "complete": false
+}
+```
+
+When `complete` is `true`, `cursor` equals `to_ledger` and the run is finished. Restarting an incomplete run resumes from `cursor + 1`.
 
 ---
 
@@ -96,6 +201,7 @@ Deliveries are sent as `POST` requests with `Content-Type: application/json`.
 - A delivery is considered successful when your endpoint responds with a `2xx` status code.
 - Failed deliveries are retried with exponential backoff: up to **5 retries over 24 hours**.
 - Each attempt is logged (timestamp, status code, response snippet) and can be inspected via the delivery log.
+- While the webhook feature is paused, new deliveries are suspended and resume after unpause; retry/backoff and logging semantics are unchanged.
 
 ### Signature verification
 
@@ -161,44 +267,66 @@ def quickex_hook():
 
 ---
 
-## Notification delivery & retry semantics
+## Contract upgrades
 
-This section documents how QuickEx turns domain events into notifications, how per-channel preferences are applied, and what delivery guarantees you can rely on as an integrator.
+Upgrade authorization is **single-use and artifact-bound**. An approval is only valid for the exact WASM hash and version it was issued for, and only within its approval window.
 
-### Event creation
+### Request an upgrade approval
 
-- A notification is created when a domain event is emitted (for example `payment.completed` when a payment is confirmed on the Stellar network).
-- Each event produces at most one notification record per recipient. The record is persisted before any channel delivery is attempted, so a delivery failure never loses the underlying event.
-- The notification record captures the event type, recipient, and the payload needed to render the message. Channel fan-out (email, in-app, webhook, etc.) happens after the record is created.
+`POST /admin/upgrades/authorize`
 
-### Preferences
+Request body:
 
-- Recipients configure which channels are enabled per event type. Preferences are evaluated at fan-out time, not at event creation time.
-- If a channel is disabled for an event type, no delivery is attempted for that channel and no delivery record is created for it.
-- Preference changes apply to notifications created after the change; already-queued deliveries are not retroactively cancelled.
+```json
+{
+  "wasm_hash": "<hex-encoded sha256 of the approved wasm>",
+  "version": "1.4.0",
+  "expires_at": "2024-01-01T01:00:00.000Z"
+}
+```
 
-### Delivery guarantees per channel
+- `wasm_hash` (required) — the exact artifact hash the approval is bound to.
+- `version` (required) — the target contract version the approval is bound to.
+- `expires_at` (required) — end of the approval window; the approval is rejected at or after this time.
 
-Delivery is **at-least-once** per enabled channel. QuickEx does **not** guarantee exactly-once delivery: a retry, a worker restart, or a duplicate enqueue can cause the same notification to be delivered more than once. Consumers must be idempotent.
+Response `201 Created`:
 
-- **In-app** — the notification is written to the recipient's in-app feed. Delivery is effectively once per notification record, but the feed may briefly show a notification before its delivery status is finalized.
-- **Email** — handed to the mail provider. Success means the provider accepted the message; final inbox placement is outside QuickEx's control.
-- **Webhook** — delivered as an HTTP `POST` (see [Webhook payload](#webhook-payload)). Success is a `2xx` response.
+```json
+{
+  "id": "up_01HXYZ...",
+  "wasm_hash": "<hex-encoded sha256 of the approved wasm>",
+  "version": "1.4.0",
+  "expires_at": "2024-01-01T01:00:00.000Z",
+  "status": "pending"
+}
+```
 
-### Retries and backoff
+### Apply an upgrade
 
-- A delivery attempt that fails (non-`2xx` response, timeout, or transport error) is retried with exponential backoff, up to **5 retries over 24 hours**.
-- Retries are scheduled per delivery, not per notification; a failure on one channel does not block other channels.
-- After the retry budget is exhausted the delivery is marked failed and is not retried again automatically.
+`POST /admin/upgrades/:id/apply`
 
-### Deduplication and its idempotency boundary
+Request body:
 
-- QuickEx deduplicates notifications at the **event creation boundary**: a given domain event produces a single notification record per recipient, so re-emitting the same event does not create a second notification.
-- This deduplication does **not** extend to delivery. Because delivery is at-least-once, the same notification may reach a channel more than once. Use the stable identifiers in the payload (`delivery_id`, `payment.id`, `payment.transaction_hash`) to deduplicate on your side.
-- There is no exactly-once guarantee across the event-creation and delivery boundaries; treat the event-creation dedup and the at-least-once delivery as separate concerns.
+```json
+{
+  "wasm_hash": "<hex-encoded sha256 of the approved wasm>",
+  "version": "1.4.0"
+}
+```
 
-### When delivery status can be delayed
+The supplied `wasm_hash` and `version` must match the values the approval was issued for. The approval is consumed on success and cannot be reused.
 
-- Delivery status reflects the latest recorded attempt and may lag behind actual delivery while a retry is scheduled or in flight.
-- Status is finalized only after a `2xx` response or after the retry budget is exhausted, so a notification can remain in a pending/retrying state for up to the 24-hour retry window.
-- Do not treat a missing or pending status as a failed delivery; poll the delivery log or rely on the terminal status.
+Failure responses (no code or registry state is changed):
+
+| Status | Condition |
+| --- | --- |
+| `409 Conflict` | Approval already consumed (replay attempt). |
+| `410 Gone` | Approval window has expired. |
+| `422 Unprocessable Entity` | `wasm_hash` or `version` does not match the approved artifact. |
+| `409 Conflict` | Approval was cancelled. |
+
+### Cancel an upgrade approval
+
+`POST /admin/upgrades/:id/cancel`
+
+Response `204 No Content`. A cancelled approval can no longer be applied.

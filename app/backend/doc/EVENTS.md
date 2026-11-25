@@ -31,6 +31,36 @@ Decoupled event handling using `@nestjs/event-emitter`.
 | :--- | :--- | :--- |
 | `receipt_status_conflict` | Fired when an observation would regress a receipt's canonical status | `{ receiptId: string, txHash: string, currentStatus: string, observedStatus: string, source: string, observedAt: string }` |
 
+## Event Compatibility Contract
+
+Indexer consumers depend on stable event names (topics) and payload shapes across contract changes. The compatibility test suite pins each public state-transition event so that any breaking change fails CI and requires an explicit versioning decision.
+
+### Pinned events
+
+Each public state-transition event is asserted for its topic name, schema version, indexed identifiers, and payload shape:
+
+| Event Name (topic) | Version | Indexed Identifiers | Payload Fields |
+| :--- | :--- | :--- | :--- |
+| `username_claimed` | `1` | `username` | `username`, `publicKey`, `timestamp` |
+| `payment_received` | `1` | `txHash` | `txHash`, `amount`, `sender` |
+| `recurring.link.created` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.updated` | `1` | `linkId` | `linkId`, `changes` |
+| `recurring.link.cancelled` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.paused` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.resumed` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.completed` | `1` | `linkId` | `linkId`, `totalExecuted` |
+| `recurring.payment.due` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `amount`, `asset`, `periodNumber` |
+| `recurring.payment.executed` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `transactionHash`, `periodNumber` |
+| `recurring.payment.failed` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `failureReason`, `retryCount`, `permanent` |
+| `receipt_status_conflict` | `1` | `receiptId`, `txHash` | `receiptId`, `txHash`, `currentStatus`, `observedStatus`, `source`, `observedAt` |
+
+### Compatibility rules
+
+- **Topic stability:** Renaming an event topic is a breaking change. The compatibility test asserts the exact topic string for every pinned event.
+- **Payload stability:** Adding, removing, renaming, or retyping a payload field is a breaking change. The compatibility test asserts the exact field set and types for every pinned event.
+- **Indexed identifiers:** The set of indexed identifiers is part of the public contract; changing it is a breaking change.
+- **Versioning decision:** Any breaking change must bump the event's `version` and be accompanied by an explicit migration note. Until then, the compatibility test fails and blocks the change.
+
 ## Receipt Status Transitions
 
 Receipt reconciliation enforces monotonic status transitions at the persistence boundary. A late or duplicated chain event must never overwrite a newer receipt state with an earlier status.
@@ -82,56 +112,29 @@ Table: `receipt_status_conflicts`
 
 Each recorded conflict also emits a `receipt_status_conflict` event with the same identifying fields so that alerting and dashboards can react without polling the table.
 
-## Notification Delivery and Retry Semantics
+## Multi-Step Escrow Event Ordering
 
-This section documents how notification events flow from creation to delivery, what guarantees exist per channel, and where delivery status can lag. It is the integrator reference for anyone consuming notification events or building on top of `NotificationService`.
+Some escrow operations perform more than one state update in a single call (for example, releasing funds and then marking the escrow settled). Indexers may infer lifecycle order from the emitted events, so the following contract is guaranteed.
 
-### Event creation flow
+### Ordering guarantees
 
-1. A domain action (e.g. `payment_received`, `recurring.payment.due`) emits an event via `@nestjs/event-emitter`.
-2. A handler decorated with `@OnEvent('event_name', { async: true })` receives the event and calls `NotificationService` to create one or more notification records — one per recipient and channel.
-3. Each notification record is persisted with its initial delivery status before any channel dispatch is attempted. Persistence is the source of truth; in-memory dispatch state is not.
-4. The service resolves the recipient's notification preferences (see below) and enqueues a delivery attempt for each enabled channel.
+- **Committed state only:** An event is emitted only after the state change it describes has been committed. Events never describe state that was rolled back.
+- **Stable ordering:** For a given operation, events are emitted in a fixed, documented order. The order is deterministic across retries and does not depend on handler registration order.
+- **No partial sequences on failure:** If any step of a multi-step operation fails, the operation is rolled back and **no** lifecycle events from that operation are emitted. Consumers never observe a prefix of a lifecycle sequence for a failed operation.
 
-Event emission is fire-and-forget from the emitter's perspective: the emitting domain action does not block on notification creation or delivery, and a notification failure never rolls back the originating domain action.
+### Multi-event operations
 
-### Preferences handling
+| Operation | Emitted events (in order) |
+| :--- | :--- |
+| Escrow release | `escrow.released` → `escrow.settled` |
+| Escrow refund | `escrow.refunded` → `escrow.settled` |
+| Escrow dispute resolution | `escrow.disputed` → `escrow.resolved` → `escrow.settled` |
 
-- Preferences are evaluated at notification creation time, per recipient and per channel.
-- A channel that is disabled in the recipient's preferences produces no delivery attempt for that channel; the notification record is still created so the in-app history remains complete.
-- Preference changes apply to notifications created after the change. Already-created notifications are not retroactively re-routed.
+### Payload consistency
 
-### Per-channel delivery guarantees
-
-No channel provides an exactly-once guarantee. The strongest guarantee available is **at-least-once delivery with best-effort deduplication** (see below). Integrators must treat notification delivery as idempotent-tolerant.
-
-| Channel | Delivery guarantee | Notes |
-| :--- | :--- | :--- |
-| In-app | At-least-once | Persisted record is the delivery; status reflects persistence, not user view. |
-| Email | At-least-once | Provider acceptance is recorded; final inbox delivery is outside our control. |
-| Webhook / push | At-least-once | Consumer endpoints must tolerate duplicate deliveries. |
-
-Delivery status values reflect the last known outcome of a delivery attempt. A status of `delivered` means the channel accepted the notification, not that the end user has read or acted on it.
-
-### Retry behavior and backoff
-
-- Failed delivery attempts are retried with exponential backoff up to a bounded maximum number of attempts.
-- Retries are per notification record and per channel; a failure on one channel does not block delivery on another.
-- Once the maximum attempt count is exhausted, the notification is marked as permanently failed and no further automatic retries occur.
-- Retries are not guaranteed to be immediate; backoff means delivery status can remain in a pending/retrying state for a period after the initial attempt.
-
-### Deduplication and its idempotency boundary
-
-- Deduplication is best-effort and keyed on the notification's identifying fields (recipient, event, and channel). It reduces duplicate deliveries caused by retries or re-emitted events.
-- The idempotency boundary is the notification record's persistence layer: a duplicate that resolves to the same record does not create a second record.
-- Deduplication does **not** guarantee exactly-once delivery. A retry after a partially successful attempt, or a re-emitted event that maps to a distinct record, can still result in a duplicate delivery. Consumers must be idempotent.
-
-### When delivery status can be delayed
-
-- **Backoff windows:** A notification awaiting a retry shows a pending/retrying status until the next attempt runs.
-- **Async handlers:** Because handlers run with `{ async: true }`, status updates are not synchronous with the originating domain action.
-- **Provider latency:** Email and webhook channels depend on external providers; status reflects provider acceptance, which can lag.
-- **Terminal failures:** A notification that exhausts retries stays in a failed state and will not transition further without manual intervention.
+- Every event in a multi-step sequence carries the same `escrowId` and `operationId` so consumers can correlate the sequence.
+- Payloads reflect the committed state at the time of emission; a later event in the sequence reflects the state after all preceding steps have been applied.
+- Events are emitted at most once per committed operation; retries of a failed operation emit a fresh, complete sequence only after the retry commits.
 
 ## How to add new handlers
 1. Inject `NotificationService` (or create a new service).
