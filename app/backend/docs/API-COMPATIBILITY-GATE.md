@@ -136,6 +136,10 @@ part of the same change:
 6. Document the breaking change in the changelog and, if applicable, the API
    versioning notes.
 
+For contract events, the equivalent migration is bumping the event schema
+version and updating the pinned expectations in the event compatibility test in
+the same change.
+
 The baseline update is the record that the breaking change was reviewed and
 approved. Do not update the baseline without a corresponding code change.
 
