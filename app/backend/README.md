@@ -14,23 +14,35 @@ dependency state without taking a live process out of rotation prematurely.
   returns a non-ready status so traffic is not routed to the instance until the
   dependency recovers.
 
-From the repository root:
+- **Committed state only.** Events are emitted only after the corresponding
+  state transition has been committed. No event is emitted for a state change
+  that is later rolled back.
+- **Stable ordering.** For a given operation, events are emitted in a fixed,
+  documented order. The lifecycle sequence is deterministic across runs and
+  environments.
+- **No partial sequences on failure.** If any step of a multi-step operation
+  fails, the operation emits no partial lifecycle sequence. Either the full
+  ordered sequence is emitted for the committed state, or nothing is emitted.
 
-```bash
-pnpm install
-```
+### Ordering reference
 
-### 2. Configure environment variables
+| Operation | Emitted events (in order) |
+|-----------|---------------------------|
+| Fund      | `EscrowFunded`            |
+| Release   | `EscrowReleased`          |
+| Refund    | `EscrowRefunded`          |
+| Cancel    | `EscrowCancelled`         |
 
-Copy the example environment file and fill in the required values:
+When an operation performs multiple state updates, the emitted events follow
+the order above and each payload reflects the committed post-transition state.
 
-```bash
-cp .env.example .env
-```
+### Testing
 
-**Required environment variables must be configured before the server will start.**
+Focused automated coverage asserts event order and payload consistency for
+multi-step operations, including the failure case where a mid-operation error
+must produce no partial lifecycle sequence.
 
-### Environment Variables
+## Contract budget regression
 
 | Variable           | Required | Default       | Description                                           |
 | ------------------ | -------- | ------------- | ----------------------------------------------------- |
@@ -42,23 +54,22 @@ cp .env.example .env
 | `MAX_USERNAMES_PER_WALLET` | No | (no limit) | Max usernames per wallet; omit for no limit           |
 | `RECONCILIATION_BATCH_SIZE` | No | `1000` | Max ledgers processed per reconciliation job; clamped to safe bounds |
 
-#### Getting Supabase credentials
+- **Reproducible.** Budget tests use fixed worst-case fixtures and a
+  deterministic measurement harness, so results are stable across runs and
+  environments.
+- **Enforced in contract CI.** The budget job runs on every contract change and
+  fails when any measured path exceeds its threshold.
+- **Explicit review for threshold changes.** Raising a threshold requires an
+  explicit review note explaining why the new bound is acceptable; silent
+  threshold bumps are rejected.
 
-1. Go to your [Supabase Dashboard](https://supabase.com/dashboard)
-2. Select your project (or create a new one)
-3. Navigate to **Project Settings** > **API**
-4. Copy the **Project URL** → `SUPABASE_URL`
-5. Copy the **anon/public** key → `SUPABASE_ANON_KEY`
+### Testing
 
-#### Example `.env` file
+Focused automated coverage includes the boundary case where a worst-case input
+sits exactly at the declared limit (must pass) and the failure case where a
+path exceeds its threshold (must fail the job).
 
-```env
-PORT=4000
-NODE_ENV=development
-NETWORK=testnet
-SUPABASE_URL=https://your-project-id.supabase.co
-SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-```
+## Documentation
 
 ### Environment Validation
 

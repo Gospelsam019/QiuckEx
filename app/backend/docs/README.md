@@ -162,6 +162,64 @@ npm run test:e2e
 - Coverage includes all major services and repositories
 - Tests use Jest framework with NestJS testing utilities
 
+### Escrow Invariant Tests
+
+Escrow state invariants are verified after every failed invocation so that a
+failure in a late validation branch cannot leave a partially updated record.
+
+- **Snapshot before failure**: Each test snapshots the relevant storage
+  (escrow records, balances, cursors) before triggering a representative
+  failure at each transition stage (deposit, withdraw, refund).
+- **Assert unchanged on failure**: After the failed call, the test asserts that
+  every invariant-relevant value matches the pre-failure snapshot.
+- **Failure classes covered**:
+  - Authorization errors (unauthorized caller, missing signer, wrong owner)
+  - Downstream transfer errors (insufficient balance, transfer rejection,
+    Horizon/Soroban submission failure)
+
+These tests live alongside the escrow service specs and run as part of
+`npm run test:unit`.
+
+### Escrow Event Ordering Tests
+
+Multi-step escrow operations (deposit, withdraw, refund) may emit more than one
+event per invocation. Indexers rely on the emitted sequence to reconstruct
+lifecycle order, so the order and payloads are treated as part of the contract.
+
+- **Committed state only**: Events are emitted only after the corresponding
+  state transition has been committed. No event is emitted for a step that did
+  not persist.
+- **Stable ordering**: For a given operation the emitted event sequence is
+  deterministic and documented below; tests assert the exact order.
+- **No partial sequences on failure**: If an operation fails at any step, no
+  lifecycle events from that invocation are emitted (no partial sequence).
+- **Payload consistency**: Each event's payload matches the committed record
+  (escrow id, amounts, participants) at the time of emission.
+
+These tests live alongside the escrow service specs and run as part of
+`npm run test:unit`.
+
+### Contract Budget Regression Tests
+
+Contract budget regression tests exercise the worst-case call paths under the
+declared limits (maximum participants, maximum amounts, maximum event payload
+size) and assert that CPU and storage growth stay within a fixed budget.
+
+- **Reproducible inputs**: Each case builds its inputs deterministically from
+  the declared limits, so the same case produces the same measurement on every
+  run and on every machine.
+- **Regression threshold**: Each case records a budget threshold. Exceeding the
+  threshold fails the contract CI job; the job does not warn-and-continue.
+- **Threshold changes require review**: Any change to a recorded threshold must
+  be accompanied by an explicit review note explaining why the budget moved.
+  Silent threshold bumps are rejected in review.
+- **Boundary coverage**: Cases include the exact-limit input (passes) and the
+  limit-plus-one input (rejected by validation) so the boundary is covered on
+  both sides.
+
+These tests run as part of the contract CI job and are not part of
+`npm run test:unit`.
+
 ## Event System
 
 ### Event Types
@@ -170,6 +228,20 @@ npm run test:e2e
 - `stellar.EscrowRefunded` - Escrow refund events
 - `payment.received` - Payment received events
 - `username.claimed` - Username claim events
+
+### Escrow Event Ordering
+
+For operations that emit multiple events, the emission order is stable and
+reflects committed state transitions:
+
+- **Deposit**: `stellar.EscrowDeposited` (single lifecycle event).
+- **Withdraw**: `stellar.EscrowWithdrawn` (single lifecycle event).
+- **Refund**: `stellar.EscrowRefunded` (single lifecycle event).
+
+When an operation performs additional state updates (e.g. balance or cursor
+updates), those are committed before the corresponding lifecycle event is
+emitted. If the operation fails, no lifecycle event is emitted for that
+invocation.
 
 ### Event Flow
 1. StellarIngestionService streams events from Horizon
@@ -219,6 +291,14 @@ refund.
 - HTTP exception filters for standardized error responses
 - Winston logging for structured logging
 - Graceful degradation for external service failures
+
+### Escrow Failure Semantics
+- A failed escrow invocation (authorization or downstream transfer error)
+  must leave escrow storage and balances unchanged.
+- Rollback is expected to be atomic; the invariant tests above guard against
+  regressions where a late validation branch partially mutates state.
+- A failed invocation emits no lifecycle events, so indexers never observe a
+  partial sequence for an operation that did not commit.
 
 ### Rate Limiting
 - Built-in rate limiting for API endpoints
